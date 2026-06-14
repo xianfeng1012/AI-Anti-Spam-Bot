@@ -28,6 +28,37 @@ def test_parse_add_ad_payload_rejects_wrong_part_count():
     assert exc.value.code == "format"
 
 
+@pytest.mark.parametrize("bad_url", [
+    "javascript:alert(1)",
+    "file:///etc/passwd",
+    "data:text/html,<script>",
+    "no-scheme.com",
+    "",
+])
+def test_parse_add_ad_payload_rejects_unsafe_url(bad_url):
+    with pytest.raises(CommandInputError) as exc:
+        parse_add_ad_payload(f"标题|{bad_url}|2099-01-01 00:00:00|10")
+
+    assert exc.value.code == "format" or exc.value.code == "invalid_url"
+
+
+@pytest.mark.parametrize("good_url", [
+    "https://t.me/test",
+    "http://example.com",
+])
+def test_parse_add_ad_payload_accepts_safe_urls(good_url):
+    ad = parse_add_ad_payload(f"标题|{good_url}|2099-01-01 00:00:00|10")
+    assert ad.url == good_url
+
+
+def test_parse_add_ad_payload_rejects_tg_protocol():
+    """tg:// 可指向任意 bot/频道/用户，存在钓鱼风险，统一禁掉。"""
+    with pytest.raises(CommandInputError) as exc:
+        parse_add_ad_payload("标题|tg://resolve?domain=phishing_bot|2099-01-01 00:00:00|10")
+
+    assert exc.value.code in {"format", "invalid_url"}
+
+
 def test_parse_delete_ad_args_returns_ad_id():
     assert parse_delete_ad_args(["42"]) == 42
 

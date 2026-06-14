@@ -79,3 +79,25 @@ def test_build_ban_notice_escapes_markdown_v2_content():
     assert "mock\\.\\(test\\)\\!" in notice
     assert "A" in notice
     assert "\\_" in notice
+
+
+def test_build_ban_notice_truncates_oversized_ai_output():
+    # 用不会在 notice 其他位置出现的标记字符串作为可识别的"超长"内容
+    huge_reason = "A" + ("a" * 4998) + "Z"  # 5000 字符，首尾可识别
+    huge_mock = "B" + ("b" * 998) + "Y"  # 1000 字符
+
+    notice = build_ban_notice(
+        None,
+        masked_name=process_nickname("Alice"),
+        user_link="tg://user?id=1",
+        score=80,
+        reason=huge_reason,
+        mock_text=huge_mock,
+    )
+
+    # reason 截到 500 字符，尾部的 'Z' 不会出现
+    assert "A" + "a" * 498 in notice  # reason 的前 500 字符
+    assert notice.count("Z") == 0
+    # mock 截到 200 字符，尾部的 'Y' 不会出现
+    assert "B" + "b" * 198 in notice
+    assert notice.count("Y") == 0

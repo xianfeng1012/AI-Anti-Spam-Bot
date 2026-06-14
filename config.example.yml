@@ -9,7 +9,10 @@ telegram:
 language: "zh"
 
 # AI 模型选择: openai / qwen / deepseek
-ai_model: "deepseek"
+# ⚠️ 图片/贴纸广告检测需要多模态(视觉)模型。
+#    openai(gpt-4o-mini) 与 qwen(qwen-vl-max) 支持图片；deepseek-chat 不支持视觉，
+#    选 deepseek 时图片/贴纸将无法被识别（仅文字检测可用）。
+ai_model: "qwen"
 
 # OpenAI 配置
 openai:

@@ -1,21 +1,12 @@
 """
 AI 反垃圾广告机器人 (AI Anti-Spam Bot)
-官方项目：https://github.com/luoyanglang/AI-Anti-Spam-Bot
-开发者：狼哥 (@luoyanglang)
-
-功能：
-1. 广告按钮管理 (/add_ad, /all_ad, /del_ad)
-2. verification_times 验证机制
-3. 灵活的检测策略配置
-4. 配置验证和错误处理优化
-
-如果本项目对您有帮助，请保留开发者信息，这是对开源作者最基本的尊重 🙏
 """
 import asyncio
 import base64
 import logging
 import sys
 import os
+import time
 from datetime import datetime
 from telegram import Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,6 +21,7 @@ from developer_info import get_start_message
 from i18n import t, set_locale
 from message_utils import (
     build_ban_notice,
+    escape_markdown_v2,
     extract_message_text,
     process_nickname,
 )
@@ -59,15 +51,11 @@ logger = logging.getLogger(__name__)
 
 stats = RuntimeStats()
 
-# 项目信息（请勿移除）
-PROJECT_INFO = {
-    'name': 'AI Anti-Spam Bot',
-    'repo': 'https://github.com/luoyanglang/AI-Anti-Spam-Bot',
-    'channel': 'https://t.me/langgefabu',
-    'group': 'https://t.me/langgepython',
-    'developer': '@luoyanglang',
-    'demo_bot': '@xiaolangzaibot'
-}
+# 群管理员检查结果缓存：避免每个消息都调 getChatMember 触发 Telegram 限流
+_ADMIN_CACHE_TTL = 300  # 5 分钟
+# 缓存条目上限：超出时清空重来，防止长跑 bot 内存无限增长
+_ADMIN_CACHE_MAX_SIZE = 10000
+_admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
 
 ai_client = create_ai_client()
 
@@ -78,13 +66,33 @@ def is_owner(user_id: int) -> bool:
     owners = config.get("telegram.owners", [])
     return str(user_id) in owners
 
+def is_group_allowed(chat_id: int) -> bool:
+    """检查群组是否在白名单内。allow_any_group=true 时放行所有群；否则只放行 groups 列表内的群。"""
+    if config.get("telegram.allow_any_group", True):
+        return True
+    allowed = config.get("telegram.groups", []) or []
+    return str(chat_id) in {str(g) for g in allowed}
+
 async def is_chat_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """检查是否为群管理员"""
+    """检查是否为群管理员，结果按 (chat_id, user_id) 缓存 5 分钟，避免高频调用 Telegram API 触发限流。"""
+    if len(_admin_cache) >= _ADMIN_CACHE_MAX_SIZE:
+        _admin_cache.clear()
+    cache_key = (chat_id, user_id)
+    now = time.monotonic()
+    cached = _admin_cache.get(cache_key)
+    if cached is not None and now - cached[0] < _ADMIN_CACHE_TTL:
+        return cached[1]
+
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except:
+        is_admin = member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
+    except Exception as e:
+        # 网络抖动等瞬时错误不写缓存，否则会把真管理员误判成普通用户并缓存 5 分钟
+        logger.debug(f"get_chat_member failed for {user_id} in {chat_id}: {e}")
         return False
+
+    _admin_cache[cache_key] = (now, is_admin)
+    return is_admin
 
 def need_check(user: UserInfo) -> bool:
     """
@@ -100,9 +108,10 @@ def need_check(user: UserInfo) -> bool:
     return should_check_user(user, strategy)
 
 def build_user_info(user, db_user: UserInfo) -> str:
-    """构建用户信息字符串（不包含用户名称，避免因名称误判）"""
+    """构建用户信息字符串（不包含用户名称，避免因名称误判）。
+    调用方已将 db_user.message_count 自增为含当前消息的值，故此处直接使用。"""
     return USER_INFO_TEMPLATE.format(
-        msg_count=db_user.message_count + 1,
+        msg_count=db_user.message_count,
         join_time=db_user.join_time.strftime("%Y-%m-%d %H:%M")
     )
 
@@ -145,7 +154,7 @@ def create_ban_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 async def send_ban_notice(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, result):
-    """发送禁言通知（带广告按钮 + 官方频道）"""
+    """发送禁言通知（带解封按钮 + 广告按钮）"""
     name = f"{user.last_name or ''}{user.first_name or ''}"
     masked_name = process_nickname(name)
     user_link = f"tg://user?id={user.id}"
@@ -159,22 +168,13 @@ async def send_ban_notice(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         mock_text=result.mock_text,
         user_id=user.id,
         chat_id=chat_id,
-        channel_url=PROJECT_INFO["channel"],
-        group_url=PROJECT_INFO["group"],
         logger=logger,
     )
-    
-    # 创建按钮：解封 + 官方频道 + 广告
+
+    # 创建按钮：解封 + 自定义广告
     buttons = []
     buttons.append([InlineKeyboardButton(t('btn_unban'), callback_data=f"unban_{user.id}")])
-    
-    # 添加官方频道按钮（品牌曝光）
-    buttons.append([
-        InlineKeyboardButton(t('btn_channel'), url=PROJECT_INFO['channel']),
-        InlineKeyboardButton(t('btn_group'), url=PROJECT_INFO['group'])
-    ])
-    
-    # 添加自定义广告按钮
+
     ads = db.get_valid_advertisements()
     for ad in ads:
         buttons.append([InlineKeyboardButton(ad.title, url=ad.url)])
@@ -218,7 +218,7 @@ async def ban_user_and_notify(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     )
     
     await send_ban_notice(context, chat_id, user, result)
-    logger.info(f"🚫 [AI Anti-Spam Bot] Banned user {user.id} in chat {chat_id}, score: {result.score} | Project: {PROJECT_INFO['repo']}")
+    logger.info(f"Banned user {user.id} in chat {chat_id}, score: {result.score}")
 
 
 # ============ 消息处理 ============
@@ -228,6 +228,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
     chat_id = message.chat_id
+
+    if not is_group_allowed(chat_id):
+        return
 
     if await is_chat_admin(chat_id, user.id, context):
         return
@@ -245,6 +248,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_user(db_user)
     
     db.increment_message_count(user.id, chat_id)
+    db_user.message_count += 1  # 让 need_check / build_user_info 看到含当前消息的计数
 
     if not need_check(db_user):
         return
@@ -276,6 +280,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     chat_id = message.chat_id
 
+    if not is_group_allowed(chat_id):
+        return
+
     if await is_chat_admin(chat_id, user.id, context):
         return
 
@@ -292,6 +299,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_user(db_user)
 
     db.increment_message_count(user.id, chat_id)
+    db_user.message_count += 1  # 让 need_check / build_user_info 看到含当前消息的计数
 
     if not need_check(db_user):
         return
@@ -332,6 +340,9 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     chat_id = message.chat_id
 
+    if not is_group_allowed(chat_id):
+        return
+
     if await is_chat_admin(chat_id, user.id, context):
         return
 
@@ -348,6 +359,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_user(db_user)
     
     db.increment_message_count(user.id, chat_id)
+    db_user.message_count += 1  # 让 need_check / build_user_info 看到含当前消息的计数
 
     if not need_check(db_user):
         return
@@ -384,31 +396,17 @@ async def handle_bot_added_to_group(update: Update, context: ContextTypes.DEFAUL
     
     # Bot 被添加到群组（从非成员变为成员）
     if old_status in [ChatMember.LEFT, ChatMember.BANNED] and new_status == ChatMember.MEMBER:
-        welcome_msg = t('welcome_message') + (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 官方项目：{PROJECT_INFO['repo']}\n"
-            f"💬 交流群组：{PROJECT_INFO['group']}"
-        )
-        
         try:
-            sent_message = await context.bot.send_message(chat.id, welcome_msg)
+            sent_message = await context.bot.send_message(chat.id, t('welcome_message'))
             delete_after = config.get("message.delete_welcome_message_after_seconds", 30)
             schedule_message_deletion(context, chat.id, sent_message.message_id, delete_after, "welcome message")
-            
         except Exception as e:
             logger.error(f"Failed to send welcome message to {chat.id}: {e}")
-    
+
     # Bot 被提升为管理员
     elif old_status == ChatMember.MEMBER and new_status == ChatMember.ADMINISTRATOR:
-        admin_msg = t('admin_promoted') + (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 官方项目：{PROJECT_INFO['repo']}\n"
-            f"📢 官方频道：{PROJECT_INFO['channel']}\n"
-            f"💬 交流群组：{PROJECT_INFO['group']}"
-        )
-        
         try:
-            await context.bot.send_message(chat.id, admin_msg)
+            await context.bot.send_message(chat.id, t('admin_promoted'))
             logger.info(f"Bot promoted to admin in group {chat.id} ({chat.title})")
         except Exception as e:
             logger.error(f"Failed to send admin promotion message to {chat.id}: {e}")
@@ -419,7 +417,10 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_member.new_chat_member.status == ChatMember.MEMBER:
         user = chat_member.new_chat_member.user
         chat_id = chat_member.chat.id
-        
+
+        if not is_group_allowed(chat_id):
+            return
+
         db_user = UserInfo(
             user_id=user.id,
             chat_id=chat_id,
@@ -555,17 +556,19 @@ async def handle_unban_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     from telegram import ChatPermissions
     
     query = update.callback_query
-    await query.answer()
-    
+
     user_id = query.from_user.id
     chat_id = query.message.chat_id
-    
+
+    # 不在此处提前 answer()：每个 callback query 只能 answer 一次，
+    # 提前应答会让后面的「权限不足/成功/失败」提示全部失效。
     if not await is_chat_admin(chat_id, user_id, context):
         await query.answer(t('admin_only'), show_alert=True)
         return
-    
+
     target_user_id = parse_unban_callback_data(query.data)
     if target_user_id is None:
+        await query.answer()
         return
     
     try:
@@ -597,8 +600,8 @@ async def handle_unban_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # 发送解禁通知（Go 版本的功能）
         admin_name = query.from_user.first_name or "Admin"
-        notice = t('unban_notice', admin=admin_name, user_id=target_user_id)
-        await context.bot.send_message(chat_id, notice, parse_mode="Markdown")
+        notice = t('unban_notice', admin=escape_markdown_v2(admin_name), user_id=target_user_id)
+        await context.bot.send_message(chat_id, notice, parse_mode="MarkdownV2")
         
         await query.answer(t('unban_success'), show_alert=False)
         
@@ -709,28 +712,18 @@ def main():
     language = config.get("language", "zh")
     set_locale(language)
     
-    # 显示项目信息
-    logger.info("=" * 60)
-    logger.info(f"🤖 {PROJECT_INFO['name']} - 官方版本")
-    logger.info(f"📦 项目地址: {PROJECT_INFO['repo']}")
-    logger.info(f"👨‍💻 开发者: {PROJECT_INFO['developer']}")
-    logger.info(f"📢 官方频道: {PROJECT_INFO['channel']}")
-    logger.info(f"💬 交流群组: {PROJECT_INFO['group']}")
-    logger.info(f"🎯 演示 Bot: {PROJECT_INFO['demo_bot']}")
-    logger.info("=" * 60)
-    
     # 验证配置
     validate_config()
-    
+
     token = config.get("telegram.token")
-    
-    # 初始化 AI 客户端（带错误处理）
+
+    # 初始化 AI 客户端
     try:
         global ai_client
         ai_client = create_ai_client()
-        logger.info(f"✅ AI 客户端初始化成功: {config.get('ai_model')}")
+        logger.info(f"AI client initialized: {config.get('ai_model')}")
     except Exception as e:
-        logger.error(f"❌ AI 客户端初始化失败: {e}")
+        logger.error(f"AI client init failed: {e}")
         sys.exit(1)
 
     import os
@@ -762,9 +755,8 @@ def main():
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_unban_button, pattern="^unban_"))
 
-    logger.info("🚀 Bot 启动中...")
-    logger.info(f"📊 检测策略: 加入{config.get('strategy.joined_days')}天内 | 发言{config.get('strategy.min_messages')}条内 | 评分>{config.get('strategy.spam_score')}分")
-    logger.info(f"💡 如果本项目对您有帮助，请给项目一个 Star: {PROJECT_INFO['repo']}")
+    logger.info("Bot starting...")
+    logger.info(f"Strategy: joined<={config.get('strategy.joined_days')}d | messages<={config.get('strategy.min_messages')} | score>={config.get('strategy.spam_score')}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
