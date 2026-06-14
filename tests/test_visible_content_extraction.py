@@ -65,3 +65,12 @@ def test_extract_message_text_returns_empty_string_when_nothing_visible():
     message = SimpleNamespace(text=None, caption=None, quote=None, reply_to_message=None)
 
     assert extract_message_text(message) == ""
+
+
+def test_extract_message_text_truncates_oversized_content():
+    huge = "x" * 5000
+    message = SimpleNamespace(text=huge, caption=None, quote=None, reply_to_message=None)
+
+    result = extract_message_text(message)
+
+    assert len(result) == 2000

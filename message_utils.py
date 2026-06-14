@@ -3,6 +3,13 @@ from __future__ import annotations
 from string import Formatter
 from typing import Optional
 
+# 提取内容上限：超过此长度的消息文本会被截断，避免喂给 AI 过多 token
+MAX_EXTRACTED_TEXT_LENGTH = 2000
+
+# AI 输出字段上限：reason / mock_text 由 AI 生成，可能超过 50 字
+MAX_REASON_LENGTH = 500
+MAX_MOCK_TEXT_LENGTH = 200
+
 DEFAULT_BAN_NOTICE_TEMPLATE = (
     "\\#封禁预警\n"
     "[{masked_name}]({user_link}) 请注意，你的用户名或发言存在违规\n"
@@ -44,13 +51,19 @@ def process_nickname(nickname: str) -> str:
     if not nickname or not nickname.strip():
         return "未知用户"
 
-    escaped = escape_markdown_v2(nickname.strip())
-    length = len(escaped)
+    # 必须先按原始字符切片再分段转义：先转义会把 "\x" 这种两字符转义序列切断，
+    # 产生悬空反斜杠导致 MarkdownV2 解析失败、封禁通知发不出去。
+    name = nickname.strip()
+    length = len(name)
     if length == 1:
-        return f"||{escaped}||"
+        return f"||{escape_markdown_v2(name)}||"
     if length == 2:
-        return f"{escaped[0]}||{escaped[1]}||"
-    return f"{escaped[0]}||{escaped[1:-1]}||{escaped[-1]}"
+        return f"{escape_markdown_v2(name[0])}||{escape_markdown_v2(name[1])}||"
+    return (
+        f"{escape_markdown_v2(name[0])}"
+        f"||{escape_markdown_v2(name[1:-1])}||"
+        f"{escape_markdown_v2(name[-1])}"
+    )
 
 
 FORWARD_METADATA_FIELDS = (
@@ -110,7 +123,10 @@ def extract_message_text(message) -> str:
             normalized_parts.append(f"{label}: {cleaned}")
             seen_values.add(cleaned)
 
-    return "\n".join(normalized_parts)
+    result = "\n".join(normalized_parts)
+    if len(result) > MAX_EXTRACTED_TEXT_LENGTH:
+        result = result[:MAX_EXTRACTED_TEXT_LENGTH]
+    return result
 
 
 def build_ban_notice(
@@ -134,8 +150,8 @@ def build_ban_notice(
         "masked_name": masked_name,
         "user_link": user_link,
         "score": score,
-        "reason": escape_markdown_v2(reason or "无"),
-        "mock": escape_markdown_v2(mock_text or "无"),
+        "reason": escape_markdown_v2((reason or "无")[:MAX_REASON_LENGTH]),
+        "mock": escape_markdown_v2((mock_text or "无")[:MAX_MOCK_TEXT_LENGTH]),
         "user_id": user_id if user_id is not None else "",
         "chat_id": chat_id if chat_id is not None else "",
         "channel_url": channel_url,

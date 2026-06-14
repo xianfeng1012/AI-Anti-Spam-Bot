@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-开发者信息模块（编译保护）
-此文件会被编译成 .pyc 字节码，普通用户难以修改
+开发者信息模块
+
+注意：Base64 编码不是真正的保护，源码可被直接编辑。
+要定制开发者信息，可使用 setup_developer_info.py（读取 MY_INFO.yml 注入）；
+或者直接编辑本文件中的 _ENCODED_INFO 字典和 get_start_message 文本。
 """
 import base64
 
@@ -42,7 +45,7 @@ def get_start_message():
         "💡 把我添加到群组并设为管理员即可开始工作！\n\n"
         "⭐ 觉得有用？给项目一个 Star\n"
         "☕ 请作者喝杯咖啡 (USDT TRC20):\n"
-        "`TH51nmRTmG4VpNDhNFudjdXMZEh5211111`"
+        "`请将本占位符替换为你的真实收款地址`"
     )
 
 def get_contact_section():
@@ -58,4 +61,4 @@ def get_contact_section():
 # 防止直接运行
 if __name__ == '__main__':
     print("⚠️  此模块不应直接运行")
-    print("开发者信息已编译保护")
+    print("如需定制开发者信息，请编辑本文件或使用 setup_developer_info.py")

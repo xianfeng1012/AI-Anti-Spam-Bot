@@ -16,6 +16,7 @@ import base64
 import logging
 import sys
 import os
+import time
 from datetime import datetime
 from telegram import Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,6 +31,7 @@ from developer_info import get_start_message
 from i18n import t, set_locale
 from message_utils import (
     build_ban_notice,
+    escape_markdown_v2,
     extract_message_text,
     process_nickname,
 )
@@ -59,6 +61,12 @@ logger = logging.getLogger(__name__)
 
 stats = RuntimeStats()
 
+# 群管理员检查结果缓存：避免每个消息都调 getChatMember 触发 Telegram 限流
+_ADMIN_CACHE_TTL = 300  # 5 分钟
+# 缓存条目上限：超出时清空重来，防止长跑 bot 内存无限增长
+_ADMIN_CACHE_MAX_SIZE = 10000
+_admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
+
 # 项目信息（请勿移除）
 PROJECT_INFO = {
     'name': 'AI Anti-Spam Bot',
@@ -78,13 +86,33 @@ def is_owner(user_id: int) -> bool:
     owners = config.get("telegram.owners", [])
     return str(user_id) in owners
 
+def is_group_allowed(chat_id: int) -> bool:
+    """检查群组是否在白名单内。allow_any_group=true 时放行所有群；否则只放行 groups 列表内的群。"""
+    if config.get("telegram.allow_any_group", True):
+        return True
+    allowed = config.get("telegram.groups", []) or []
+    return str(chat_id) in {str(g) for g in allowed}
+
 async def is_chat_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """检查是否为群管理员"""
+    """检查是否为群管理员，结果按 (chat_id, user_id) 缓存 5 分钟，避免高频调用 Telegram API 触发限流。"""
+    if len(_admin_cache) >= _ADMIN_CACHE_MAX_SIZE:
+        _admin_cache.clear()
+    cache_key = (chat_id, user_id)
+    now = time.monotonic()
+    cached = _admin_cache.get(cache_key)
+    if cached is not None and now - cached[0] < _ADMIN_CACHE_TTL:
+        return cached[1]
+
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except:
+        is_admin = member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
+    except Exception as e:
+        # 网络抖动等瞬时错误不写缓存，否则会把真管理员误判成普通用户并缓存 5 分钟
+        logger.debug(f"get_chat_member failed for {user_id} in {chat_id}: {e}")
         return False
+
+    _admin_cache[cache_key] = (now, is_admin)
+    return is_admin
 
 def need_check(user: UserInfo) -> bool:
     """
@@ -100,9 +128,10 @@ def need_check(user: UserInfo) -> bool:
     return should_check_user(user, strategy)
 
 def build_user_info(user, db_user: UserInfo) -> str:
-    """构建用户信息字符串（不包含用户名称，避免因名称误判）"""
+    """构建用户信息字符串（不包含用户名称，避免因名称误判）。
+    调用方已将 db_user.message_count 自增为含当前消息的值，故此处直接使用。"""
     return USER_INFO_TEMPLATE.format(
-        msg_count=db_user.message_count + 1,
+        msg_count=db_user.message_count,
         join_time=db_user.join_time.strftime("%Y-%m-%d %H:%M")
     )
 
@@ -229,6 +258,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     chat_id = message.chat_id
 
+    if not is_group_allowed(chat_id):
+        return
+
     if await is_chat_admin(chat_id, user.id, context):
         return
 
@@ -245,6 +277,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_user(db_user)
     
     db.increment_message_count(user.id, chat_id)
+    db_user.message_count += 1  # 让 need_check / build_user_info 看到含当前消息的计数
 
     if not need_check(db_user):
         return
@@ -276,6 +309,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     chat_id = message.chat_id
 
+    if not is_group_allowed(chat_id):
+        return
+
     if await is_chat_admin(chat_id, user.id, context):
         return
 
@@ -292,6 +328,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_user(db_user)
 
     db.increment_message_count(user.id, chat_id)
+    db_user.message_count += 1  # 让 need_check / build_user_info 看到含当前消息的计数
 
     if not need_check(db_user):
         return
@@ -332,6 +369,9 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     chat_id = message.chat_id
 
+    if not is_group_allowed(chat_id):
+        return
+
     if await is_chat_admin(chat_id, user.id, context):
         return
 
@@ -348,6 +388,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_user(db_user)
     
     db.increment_message_count(user.id, chat_id)
+    db_user.message_count += 1  # 让 need_check / build_user_info 看到含当前消息的计数
 
     if not need_check(db_user):
         return
@@ -419,7 +460,10 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_member.new_chat_member.status == ChatMember.MEMBER:
         user = chat_member.new_chat_member.user
         chat_id = chat_member.chat.id
-        
+
+        if not is_group_allowed(chat_id):
+            return
+
         db_user = UserInfo(
             user_id=user.id,
             chat_id=chat_id,
@@ -555,17 +599,19 @@ async def handle_unban_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     from telegram import ChatPermissions
     
     query = update.callback_query
-    await query.answer()
-    
+
     user_id = query.from_user.id
     chat_id = query.message.chat_id
-    
+
+    # 不在此处提前 answer()：每个 callback query 只能 answer 一次，
+    # 提前应答会让后面的「权限不足/成功/失败」提示全部失效。
     if not await is_chat_admin(chat_id, user_id, context):
         await query.answer(t('admin_only'), show_alert=True)
         return
-    
+
     target_user_id = parse_unban_callback_data(query.data)
     if target_user_id is None:
+        await query.answer()
         return
     
     try:
@@ -597,8 +643,8 @@ async def handle_unban_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # 发送解禁通知（Go 版本的功能）
         admin_name = query.from_user.first_name or "Admin"
-        notice = t('unban_notice', admin=admin_name, user_id=target_user_id)
-        await context.bot.send_message(chat_id, notice, parse_mode="Markdown")
+        notice = t('unban_notice', admin=escape_markdown_v2(admin_name), user_id=target_user_id)
+        await context.bot.send_message(chat_id, notice, parse_mode="MarkdownV2")
         
         await query.answer(t('unban_success'), show_alert=False)
         

@@ -197,6 +197,49 @@ async def _return_false(*args, **kwargs):
     return False
 
 
+def test_is_chat_admin_uses_cache_to_avoid_repeated_api_calls(bot_module, monkeypatch):
+    """第二次调用同样的 (chat_id, user_id) 不应再触发 get_chat_member。"""
+    bot_module._admin_cache.clear()
+    fake_bot = SimpleNamespace()
+    call_count = []
+
+    async def fake_get_chat_member(chat_id, user_id):
+        call_count.append((chat_id, user_id))
+        return SimpleNamespace(status=bot_module.ChatMember.ADMINISTRATOR)
+
+    fake_bot.get_chat_member = fake_get_chat_member
+    context = SimpleNamespace(bot=fake_bot)
+
+    first = asyncio.run(bot_module.is_chat_admin(100, 42, context))
+    second = asyncio.run(bot_module.is_chat_admin(100, 42, context))
+
+    assert first is True
+    assert second is True
+    assert len(call_count) == 1
+
+
+def test_is_chat_admin_cache_treats_different_users_independently(bot_module, monkeypatch):
+    bot_module._admin_cache.clear()
+    fake_bot = SimpleNamespace()
+    call_count = []
+
+    async def fake_get_chat_member(chat_id, user_id):
+        call_count.append((chat_id, user_id))
+        if user_id == 1:
+            return SimpleNamespace(status=bot_module.ChatMember.OWNER)
+        return SimpleNamespace(status=bot_module.ChatMember.MEMBER)
+
+    fake_bot.get_chat_member = fake_get_chat_member
+    context = SimpleNamespace(bot=fake_bot)
+
+    r1 = asyncio.run(bot_module.is_chat_admin(100, 1, context))
+    r2 = asyncio.run(bot_module.is_chat_admin(100, 2, context))
+
+    assert r1 is True
+    assert r2 is False
+    assert len(call_count) == 2
+
+
 def test_cmd_stats_requires_owner(bot_module, monkeypatch):
     monkeypatch.setattr(bot_module, "is_owner", lambda user_id: False)
     message = FakeMessage()
@@ -321,7 +364,7 @@ def test_handle_unban_button_requires_admin(bot_module, monkeypatch):
 
     asyncio.run(bot_module.handle_unban_button(update, SimpleNamespace(bot=FakeBot())))
 
-    assert query.answers == [(None, None), ("admin_only", True)]
+    assert query.answers == [("admin_only", True)]
 
 
 def test_handle_unban_button_unbans_target_and_notifies(bot_module, monkeypatch):
@@ -341,9 +384,9 @@ def test_handle_unban_button_unbans_target_and_notifies(bot_module, monkeypatch)
     assert fake_bot.restrict_calls[0]["user_id"] == 123
     assert query_message.deleted is True
     assert fake_bot.send_calls == [
-        (100, "unban_notice|admin=Boss,user_id=123", {"parse_mode": "Markdown"})
+        (100, "unban_notice|admin=Boss,user_id=123", {"parse_mode": "MarkdownV2"})
     ]
-    assert query.answers == [(None, None), ("unban_success", False)]
+    assert query.answers == [("unban_success", False)]
 
 
 def test_handle_text_skips_admin_messages(bot_module, monkeypatch):
@@ -717,7 +760,7 @@ def test_handle_unban_button_logs_warning_when_notice_delete_fails(bot_module, m
 
     assert fake_logger.warnings
     assert fake_bot.send_calls == [
-        (100, "unban_notice|admin=Boss,user_id=123", {"parse_mode": "Markdown"})
+        (100, "unban_notice|admin=Boss,user_id=123", {"parse_mode": "MarkdownV2"})
     ]
 
 

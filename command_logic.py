@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Sequence
+from urllib.parse import urlparse
 
 from database import Advertisement
 
@@ -15,6 +16,22 @@ class CommandInputError(ValueError):
         return self.code
 
 
+# Telegram inline 按钮允许的 URL 协议
+# 注意：不放行 tg:// 协议——tg://resolve?domain= 等可指向任意 bot/频道/用户，
+# 一旦 bot owner 账号被盗，攻击者就能塞钓鱼链接。仅允许 http(s)，用户可用 https://t.me/ 链接到任何目标。
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _validate_ad_url(url: str) -> None:
+    """校验广告 URL 协议，拒绝 javascript: 等危险 scheme。"""
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except ValueError:
+        raise CommandInputError("invalid_url")
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise CommandInputError("invalid_url")
+
+
 def parse_add_ad_payload(payload: str) -> Advertisement:
     parts = [part.strip() for part in payload.split("|")]
     if len(parts) != 4:
@@ -23,6 +40,8 @@ def parse_add_ad_payload(payload: str) -> Advertisement:
     title, url, validity_str, sort_str = parts
     if not title or not url:
         raise CommandInputError("format")
+
+    _validate_ad_url(url)
 
     try:
         validity = datetime.strptime(validity_str, "%Y-%m-%d %H:%M:%S")
