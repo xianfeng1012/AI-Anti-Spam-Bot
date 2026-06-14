@@ -11,7 +11,7 @@ no_permission: "⚠️ No permission"
 welcome_message: |
   👋 Hello! I've joined the group
 
-  🛡️ I'm an AI anti-spam bot developed by @luoyanglang, automatically detecting, deleting and banning spam users
+  🛡️ I'm an AI anti-spam bot that automatically detects, deletes and bans spam users
 
   ⚠️ Please set me as admin first
   Required permissions:

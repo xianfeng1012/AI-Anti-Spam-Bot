@@ -1,15 +1,5 @@
 """
 AI 反垃圾广告机器人 (AI Anti-Spam Bot)
-官方项目：https://github.com/luoyanglang/AI-Anti-Spam-Bot
-开发者：狼哥 (@luoyanglang)
-
-功能：
-1. 广告按钮管理 (/add_ad, /all_ad, /del_ad)
-2. verification_times 验证机制
-3. 灵活的检测策略配置
-4. 配置验证和错误处理优化
-
-如果本项目对您有帮助，请保留开发者信息，这是对开源作者最基本的尊重 🙏
 """
 import asyncio
 import base64
@@ -66,16 +56,6 @@ _ADMIN_CACHE_TTL = 300  # 5 分钟
 # 缓存条目上限：超出时清空重来，防止长跑 bot 内存无限增长
 _ADMIN_CACHE_MAX_SIZE = 10000
 _admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
-
-# 项目信息（请勿移除）
-PROJECT_INFO = {
-    'name': 'AI Anti-Spam Bot',
-    'repo': 'https://github.com/luoyanglang/AI-Anti-Spam-Bot',
-    'channel': 'https://t.me/langgefabu',
-    'group': 'https://t.me/langgepython',
-    'developer': '@luoyanglang',
-    'demo_bot': '@xiaolangzaibot'
-}
 
 ai_client = create_ai_client()
 
@@ -174,7 +154,7 @@ def create_ban_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 async def send_ban_notice(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, result):
-    """发送禁言通知（带广告按钮 + 官方频道）"""
+    """发送禁言通知（带解封按钮 + 广告按钮）"""
     name = f"{user.last_name or ''}{user.first_name or ''}"
     masked_name = process_nickname(name)
     user_link = f"tg://user?id={user.id}"
@@ -188,22 +168,13 @@ async def send_ban_notice(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         mock_text=result.mock_text,
         user_id=user.id,
         chat_id=chat_id,
-        channel_url=PROJECT_INFO["channel"],
-        group_url=PROJECT_INFO["group"],
         logger=logger,
     )
-    
-    # 创建按钮：解封 + 官方频道 + 广告
+
+    # 创建按钮：解封 + 自定义广告
     buttons = []
     buttons.append([InlineKeyboardButton(t('btn_unban'), callback_data=f"unban_{user.id}")])
-    
-    # 添加官方频道按钮（品牌曝光）
-    buttons.append([
-        InlineKeyboardButton(t('btn_channel'), url=PROJECT_INFO['channel']),
-        InlineKeyboardButton(t('btn_group'), url=PROJECT_INFO['group'])
-    ])
-    
-    # 添加自定义广告按钮
+
     ads = db.get_valid_advertisements()
     for ad in ads:
         buttons.append([InlineKeyboardButton(ad.title, url=ad.url)])
@@ -247,7 +218,7 @@ async def ban_user_and_notify(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     )
     
     await send_ban_notice(context, chat_id, user, result)
-    logger.info(f"🚫 [AI Anti-Spam Bot] Banned user {user.id} in chat {chat_id}, score: {result.score} | Project: {PROJECT_INFO['repo']}")
+    logger.info(f"Banned user {user.id} in chat {chat_id}, score: {result.score}")
 
 
 # ============ 消息处理 ============
@@ -425,31 +396,17 @@ async def handle_bot_added_to_group(update: Update, context: ContextTypes.DEFAUL
     
     # Bot 被添加到群组（从非成员变为成员）
     if old_status in [ChatMember.LEFT, ChatMember.BANNED] and new_status == ChatMember.MEMBER:
-        welcome_msg = t('welcome_message') + (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 官方项目：{PROJECT_INFO['repo']}\n"
-            f"💬 交流群组：{PROJECT_INFO['group']}"
-        )
-        
         try:
-            sent_message = await context.bot.send_message(chat.id, welcome_msg)
+            sent_message = await context.bot.send_message(chat.id, t('welcome_message'))
             delete_after = config.get("message.delete_welcome_message_after_seconds", 30)
             schedule_message_deletion(context, chat.id, sent_message.message_id, delete_after, "welcome message")
-            
         except Exception as e:
             logger.error(f"Failed to send welcome message to {chat.id}: {e}")
-    
+
     # Bot 被提升为管理员
     elif old_status == ChatMember.MEMBER and new_status == ChatMember.ADMINISTRATOR:
-        admin_msg = t('admin_promoted') + (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 官方项目：{PROJECT_INFO['repo']}\n"
-            f"📢 官方频道：{PROJECT_INFO['channel']}\n"
-            f"💬 交流群组：{PROJECT_INFO['group']}"
-        )
-        
         try:
-            await context.bot.send_message(chat.id, admin_msg)
+            await context.bot.send_message(chat.id, t('admin_promoted'))
             logger.info(f"Bot promoted to admin in group {chat.id} ({chat.title})")
         except Exception as e:
             logger.error(f"Failed to send admin promotion message to {chat.id}: {e}")
@@ -755,28 +712,18 @@ def main():
     language = config.get("language", "zh")
     set_locale(language)
     
-    # 显示项目信息
-    logger.info("=" * 60)
-    logger.info(f"🤖 {PROJECT_INFO['name']} - 官方版本")
-    logger.info(f"📦 项目地址: {PROJECT_INFO['repo']}")
-    logger.info(f"👨‍💻 开发者: {PROJECT_INFO['developer']}")
-    logger.info(f"📢 官方频道: {PROJECT_INFO['channel']}")
-    logger.info(f"💬 交流群组: {PROJECT_INFO['group']}")
-    logger.info(f"🎯 演示 Bot: {PROJECT_INFO['demo_bot']}")
-    logger.info("=" * 60)
-    
     # 验证配置
     validate_config()
-    
+
     token = config.get("telegram.token")
-    
-    # 初始化 AI 客户端（带错误处理）
+
+    # 初始化 AI 客户端
     try:
         global ai_client
         ai_client = create_ai_client()
-        logger.info(f"✅ AI 客户端初始化成功: {config.get('ai_model')}")
+        logger.info(f"AI client initialized: {config.get('ai_model')}")
     except Exception as e:
-        logger.error(f"❌ AI 客户端初始化失败: {e}")
+        logger.error(f"AI client init failed: {e}")
         sys.exit(1)
 
     import os
@@ -808,9 +755,8 @@ def main():
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_unban_button, pattern="^unban_"))
 
-    logger.info("🚀 Bot 启动中...")
-    logger.info(f"📊 检测策略: 加入{config.get('strategy.joined_days')}天内 | 发言{config.get('strategy.min_messages')}条内 | 评分>{config.get('strategy.spam_score')}分")
-    logger.info(f"💡 如果本项目对您有帮助，请给项目一个 Star: {PROJECT_INFO['repo']}")
+    logger.info("Bot starting...")
+    logger.info(f"Strategy: joined<={config.get('strategy.joined_days')}d | messages<={config.get('strategy.min_messages')} | score>={config.get('strategy.spam_score')}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
